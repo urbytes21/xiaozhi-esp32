@@ -19,10 +19,16 @@ jobs:
     outputs:
       variants: ${{ steps.select.outputs.variants }}
     steps:
-      - name: Checkout
+      - name: Checkout (full history, fork-safe)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Fetch base branch (PR only)
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch origin ${{ github.event.pull_request.base.ref }}
 
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
