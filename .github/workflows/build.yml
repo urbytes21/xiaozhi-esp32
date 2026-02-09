@@ -18,6 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       variants: ${{ steps.select.outputs.variants }}
+
     steps:
       - name: Checkout (full history, fork-safe)
         uses: actions/checkout@v4
@@ -42,26 +43,43 @@ jobs:
         name: Select variants based on changes
         env:
           ALL_VARIANTS: ${{ steps.list.outputs.all_variants }}
+        shell: bash
         run: |
           EVENT_NAME="${{ github.event_name }}"
 
-          # push 到 main 分支，编译全部变体
+          # ✅ Allowlist (extend here only)
+          ALLOWED_BOARDS=("esp32" "esp32s3")
+
+          # Convert allowlist to JSON
+          ALLOWED_JSON=$(printf '%s\n' "${ALLOWED_BOARDS[@]}" | jq -R -s -c 'split("\n")[:-1]')
+
+          # Filter all variants to allowed boards only
+          FILTERED_ALL=$(echo "$ALL_VARIANTS" | jq -c \
+            --argjson boards "$ALLOWED_JSON" \
+            'map(select(.board as $b | $boards | index($b)))'
+          )
+
+          # push → build all allowed variants
           if [[ "$EVENT_NAME" == "push" ]]; then
-            echo "variants=$ALL_VARIANTS" >> $GITHUB_OUTPUT
+            echo "variants=$FILTERED_ALL" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          # pull_request 场景
+          # pull_request
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
           HEAD_SHA="${{ github.event.pull_request.head.sha }}"
           echo "Base: $BASE_SHA, Head: $HEAD_SHA"
 
-          CHANGED=$(git diff --name-only $BASE_SHA $HEAD_SHA || true)
+          CHANGED=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" || true)
           echo -e "Changed files:\n$CHANGED"
 
           NEED_ALL=0
           declare -A AFFECTED
+
           while IFS= read -r file; do
+            [[ -z "$file" ]] && continue
+
+            # Core changes → rebuild all allowed boards
             if [[ "$file" == main/* && "$file" != main/boards/* ]]; then
               NEED_ALL=1
             fi
@@ -70,35 +88,50 @@ jobs:
               NEED_ALL=1
             fi
 
-            if [[ "$file" == main/boards/* ]]; then
+            # Board-specific changes (generic)
+            if [[ "$file" == main/boards/*/* ]]; then
               board=$(echo "$file" | cut -d '/' -f3)
-              AFFECTED[$board]=1
+              for allowed in "${ALLOWED_BOARDS[@]}"; do
+                if [[ "$board" == "$allowed" ]]; then
+                  AFFECTED["$board"]=1
+                fi
+              done
             fi
           done <<< "$CHANGED"
 
           if [[ "$NEED_ALL" -eq 1 ]]; then
-            echo "variants=$ALL_VARIANTS" >> $GITHUB_OUTPUT
-          else
-            if [[ ${#AFFECTED[@]} -eq 0 ]]; then
-              echo "variants=[]" >> $GITHUB_OUTPUT
-            else
-              BOARDS_JSON=$(printf '%s\n' "${!AFFECTED[@]}" | sort -u | jq -R -s -c 'split("\n")[:-1]')
-              FILTERED=$(echo "$ALL_VARIANTS" | jq -c --argjson boards "$BOARDS_JSON" 'map(select(.board as $b | $boards | index($b)))')
-              echo "variants=$FILTERED" >> $GITHUB_OUTPUT
-            fi
+            echo "variants=$FILTERED_ALL" >> $GITHUB_OUTPUT
+            exit 0
           fi
+
+          if [[ ${#AFFECTED[@]} -eq 0 ]]; then
+            echo "variants=[]" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          AFFECTED_JSON=$(printf '%s\n' "${!AFFECTED[@]}" | sort -u | jq -R -s -c 'split("\n")[:-1]')
+
+          FILTERED=$(echo "$FILTERED_ALL" | jq -c \
+            --argjson boards "$AFFECTED_JSON" \
+            'map(select(.board as $b | $boards | index($b)))'
+          )
+
+          echo "variants=$FILTERED" >> $GITHUB_OUTPUT
 
   build:
     name: Build ${{ matrix.name }}
     needs: prepare
     if: ${{ needs.prepare.outputs.variants != '[]' }}
+
     strategy:
-      fail-fast: false  # 单个变体失败不影响其它变体
+      fail-fast: false
       matrix:
         include: ${{ fromJson(needs.prepare.outputs.variants) }}
+
     runs-on: ubuntu-latest
     container:
       image: espressif/idf:v5.5.2
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
