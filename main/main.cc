@@ -11,7 +11,7 @@
 #include "system_info.h"
 
 #define TAG "main"
-
+#define TEST "cicd"
 extern "C" void app_main(void)
 {
     // Initialize NVS flash for WiFi configuration
